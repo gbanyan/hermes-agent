@@ -88,7 +88,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa", "brave"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -99,6 +99,7 @@ def _get_backend() -> str:
         ("parallel", _has_env("PARALLEL_API_KEY")),
         ("tavily", _has_env("TAVILY_API_KEY")),
         ("exa", _has_env("EXA_API_KEY")),
+        ("brave", _has_env("BRAVE_API_KEY")),
     )
     for backend, available in backend_candidates:
         if available:
@@ -117,6 +118,8 @@ def _is_backend_available(backend: str) -> bool:
         return check_firecrawl_api_key()
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
+    if backend == "brave":
+        return _has_env("BRAVE_API_KEY")
     return False
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
@@ -956,6 +959,104 @@ def _exa_extract(urls: List[str]) -> List[Dict[str, Any]]:
     return results
 
 
+# ─── Brave Search + Crawl4AI Extract Helpers ─────────────────────────────────
+
+def _brave_search(query: str, limit: int = 10) -> dict:
+    """Search using the Brave Search API and return results as a dict."""
+    from tools.interrupt import is_interrupted
+    if is_interrupted():
+        return {"error": "Interrupted", "success": False}
+
+    api_key = os.getenv("BRAVE_API_KEY")
+    if not api_key:
+        return {"error": "BRAVE_API_KEY not set", "success": False}
+
+    import requests
+    logger.info("Brave search: '%s' (limit=%d)", query, limit)
+    resp = requests.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+        params={"q": query, "count": min(limit, 20)},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    web_results = []
+    for i, result in enumerate(data.get("web", {}).get("results", [])):
+        web_results.append({
+            "url": result.get("url", ""),
+            "title": result.get("title", ""),
+            "description": result.get("description", ""),
+            "position": i + 1,
+        })
+
+    return {"success": True, "data": {"web": web_results}}
+
+
+def _crawl4ai_extract(urls: List[str]) -> List[Dict[str, Any]]:
+    """Extract content from URLs using a local Crawl4AI server.
+
+    Falls back to raw HTTP + html2text if Crawl4AI is unreachable.
+    Expects CRAWL4AI_URL env var or defaults to http://localhost:11235.
+    """
+    from tools.interrupt import is_interrupted
+    if is_interrupted():
+        return [{"url": u, "error": "Interrupted", "title": ""} for u in urls]
+
+    base_url = os.getenv("CRAWL4AI_URL", "http://localhost:11235")
+    logger.info("Crawl4AI extract: %d URL(s) via %s", len(urls), base_url)
+
+    import requests
+    results = []
+    for url in urls:
+        if is_interrupted():
+            results.append({"url": url, "error": "Interrupted", "title": ""})
+            continue
+        try:
+            resp = requests.post(
+                f"{base_url}/crawl",
+                json={"urls": [url], "priority": 5},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            crawl_results = data.get("results", [])
+            if crawl_results:
+                cr = crawl_results[0]
+                md = cr.get("markdown", {})
+                content = md.get("raw_markdown", "") or md.get("fit_markdown", "")
+                title = cr.get("metadata", {}).get("title", "") if cr.get("metadata") else ""
+                results.append({
+                    "url": url,
+                    "title": title,
+                    "content": content,
+                    "raw_content": content,
+                    "metadata": {"sourceURL": url, "title": title},
+                })
+            else:
+                results.append({"url": url, "title": "", "content": "", "error": "No results from Crawl4AI"})
+        except Exception as exc:
+            logger.warning("Crawl4AI failed for %s, falling back to raw HTTP: %s", url, exc)
+            try:
+                raw_resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                raw_resp.raise_for_status()
+                import re as _re
+                text = _re.sub(r'<[^>]+>', ' ', raw_resp.text)
+                text = _re.sub(r'\s+', ' ', text).strip()
+                results.append({
+                    "url": url,
+                    "title": "",
+                    "content": text[:50000],
+                    "raw_content": text[:50000],
+                    "metadata": {"sourceURL": url, "title": ""},
+                })
+            except Exception as fallback_exc:
+                results.append({"url": url, "title": "", "content": "", "error": str(fallback_exc)})
+
+    return results
+
+
 # ─── Parallel Search & Extract Helpers ────────────────────────────────────────
 
 def _parallel_search(query: str, limit: int = 5) -> dict:
@@ -1095,6 +1196,15 @@ def web_search_tool(query: str, limit: int = 5) -> str:
 
         if backend == "exa":
             response_data = _exa_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
+        if backend == "brave":
+            response_data = _brave_search(query, limit)
             debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
             result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
             debug_call_data["final_response_size"] = len(result_json)
@@ -1245,6 +1355,8 @@ async def web_extract_tool(
                 results = await _parallel_extract(safe_urls)
             elif backend == "exa":
                 results = _exa_extract(safe_urls)
+            elif backend == "brave":
+                results = _crawl4ai_extract(safe_urls)
             elif backend == "tavily":
                 logger.info("Tavily extract: %d URL(s)", len(safe_urls))
                 raw = _tavily_request("extract", {
@@ -1922,9 +2034,9 @@ def check_firecrawl_api_key() -> bool:
 def check_web_api_key() -> bool:
     """Check whether the configured web backend is available."""
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in ("exa", "parallel", "firecrawl", "tavily"):
+    if configured in ("exa", "parallel", "firecrawl", "tavily", "brave"):
         return _is_backend_available(configured)
-    return any(_is_backend_available(backend) for backend in ("exa", "parallel", "firecrawl", "tavily"))
+    return any(_is_backend_available(backend) for backend in ("exa", "parallel", "firecrawl", "tavily", "brave"))
 
 
 def check_auxiliary_model() -> bool:

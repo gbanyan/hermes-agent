@@ -2742,12 +2742,25 @@ class DiscordAdapter(BasePlatformAdapter):
         _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
         _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None)
 
+        # Extract reply context if this message is a reply
         reply_to_id = None
         reply_to_text = None
-        if message.reference:
+        if message.reference and message.reference.message_id:
             reply_to_id = str(message.reference.message_id)
-            if message.reference.resolved:
-                reply_to_text = getattr(message.reference.resolved, "content", None) or None
+            ref_msg = message.reference.resolved
+            if ref_msg and hasattr(ref_msg, 'content') and ref_msg.content:
+                reply_to_text = ref_msg.content
+                logger.debug("[Discord] Reply context from cache: %d chars", len(reply_to_text))
+            else:
+                try:
+                    fetched = await message.channel.fetch_message(message.reference.message_id)
+                    if fetched and fetched.content:
+                        reply_to_text = fetched.content
+                        logger.debug("[Discord] Reply context fetched: %d chars", len(reply_to_text))
+                    else:
+                        logger.debug("[Discord] Reply target %s has no text content", reply_to_id)
+                except Exception as e:
+                    logger.warning("[Discord] Could not fetch reply target %s: %s", reply_to_id, e)
 
         event = MessageEvent(
             text=event_text,

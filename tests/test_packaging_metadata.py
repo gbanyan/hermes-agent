@@ -20,3 +20,10 @@ def test_manifest_includes_bundled_skills():
 
     assert "graft skills" in manifest
     assert "graft optional-skills" in manifest
+
+
+def test_homebrew_formula_uses_current_pypi_packages_dsl():
+    formula = (REPO_ROOT / "packaging" / "homebrew" / "hermes-agent.rb").read_text(encoding="utf-8")
+
+    assert "pypi_packages exclude_packages:" in formula
+    assert "ignore_packages" not in formula
