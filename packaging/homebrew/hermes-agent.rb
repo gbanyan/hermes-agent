@@ -3,19 +3,18 @@ class HermesAgent < Formula
 
   desc "Self-improving AI agent that creates skills from experience"
   homepage "https://hermes-agent.nousresearch.com"
-  # Stable releases do not yet publish a semver-named sdist asset, so the
-  # formula targets the GitHub release tag tarball and pins an explicit version.
-  url "https://github.com/NousResearch/hermes-agent/archive/refs/tags/v2026.4.16.tar.gz"
-  version "0.10.0"
-  sha256 "ef999b93b487532c50f8ed42c3ac0141a52d128052ba0a0d0e90c6edc02e97fe"
+  # Stable source should point at the semver-named sdist asset attached by
+  # scripts/release.py, not the CalVer tag tarball.
+  url "https://github.com/NousResearch/hermes-agent/releases/download/v2026.3.30/hermes_agent-0.6.0.tar.gz"
+  sha256 "<replace-with-release-asset-sha256>"
   license "MIT"
 
   depends_on "certifi" => :no_linkage
+  depends_on "cryptography" => :no_linkage
   depends_on "libyaml"
-  depends_on "pydantic" => :no_linkage
   depends_on "python@3.14"
 
-  pypi_packages exclude_packages: %w[certifi pydantic]
+  pypi_packages ignore_packages: %w[certifi cryptography pydantic]
 
   # Refresh resource stanzas after bumping the source url/version:
   #   brew update-python-resources --print-only hermes-agent

@@ -326,31 +326,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         job["id"], platform_name, chat_id, err,
                     )
                     adapter_ok = False  # fall through to standalone path
-                elif send_result and getattr(send_result, "success", True):
-                    # Remember every chunk's message_id so a reply to any chunk
-                    # (not just the first one that carries the "Cronjob Response:"
-                    # header) can recover the job's skill context in gateway/run.py.
-                    try:
-                        from cron.delivery_registry import register as _register_delivery
-                        raw = getattr(send_result, "raw_response", None) or {}
-                        mids = []
-                        raw_ids = raw.get("message_ids") if isinstance(raw, dict) else None
-                        if raw_ids:
-                            mids = list(raw_ids)
-                        elif getattr(send_result, "message_id", None):
-                            mids = [send_result.message_id]
-                        _register_delivery(
-                            platform_name,
-                            chat_id,
-                            mids,
-                            job.get("name", job["id"]),
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Job '%s': could not register delivery message ids",
-                            job["id"],
-                            exc_info=True,
-                        )
 
             # Send extracted media files as native attachments via the live adapter
             if adapter_ok and media_files:
@@ -725,18 +700,6 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             message = format_runtime_provider_error(exc)
             raise RuntimeError(message) from exc
 
-        # Fix copilot api_mode: resolve_runtime_provider uses config.yaml's
-        # default model for api_mode detection, but cron jobs may override
-        # the model. Re-detect api_mode using the job's actual model.
-        if runtime.get("provider") == "copilot" and model:
-            try:
-                from hermes_cli.models import copilot_model_api_mode
-                new_mode = copilot_model_api_mode(model)
-                logger.info("Job '%s': copilot api_mode fix: %s -> %s", job_name, runtime.get("api_mode"), new_mode)
-                runtime["api_mode"] = new_mode
-            except Exception as e:
-                logger.warning("Job '%s': copilot api_mode fix failed: %s", job_name, e)
-
         from agent.smart_model_routing import resolve_turn_route
         turn_route = resolve_turn_route(
             prompt,
@@ -787,7 +750,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             providers_ignored=pr.get("ignore"),
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
-            disabled_toolsets=["cronjob", "messaging", "clarify", "tts", "homeassistant", "skills"],
+            disabled_toolsets=["cronjob", "messaging", "clarify"],
             quiet_mode=True,
             skip_context_files=True,  # Don't inject SOUL.md/AGENTS.md from scheduler cwd
             skip_memory=True,  # Cron system prompts would corrupt user representations
